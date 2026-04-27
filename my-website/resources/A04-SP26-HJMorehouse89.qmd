@@ -1,0 +1,423 @@
+---
+title: "Module 5 Assignment: Machine Learning on Scale"
+author:
+  - name: Holly Morehouse
+    affiliations:
+      - id: bu
+        name: Boston University
+        city: Boston
+        state: MA
+number-sections: true
+date: '2024-11-21'
+format:
+  html:
+    theme: cerulean
+    toc: true
+    toc-depth: 2
+  docx:
+    theme: cerulean
+    toc: true
+    toc-depth: 2
+date-modified: today
+date-format: long
+execute:
+  echo: false
+  eval: true
+  freeze: auto
+---
+
+
+## System Information {.unnumbered}
+
+```{python}
+# | eval: true
+# | echo: true
+import platform
+import psutil
+
+print("Operating System:", platform.system(), platform.release())
+print("Python Version:", platform.python_version())
+print("Machine:", platform.machine())
+print("Processor:", platform.processor())
+
+mem = psutil.virtual_memory()
+print("Total Memory (MB):", round(mem.total / (1024**2), 2))
+print("Available Memory (MB):", round(mem.available / (1024**2), 2))
+```
+
+
+## Start your assignment here
+
+
+
+## Github Link
+https://github.com/hjmorehouse89/A04-SP26-HJMorehouse89
+
+
+```{python}
+from pyspark.sql import SparkSession
+from pyspark.sql import functions as F
+from pyspark.sql.functions import col, when, pow, trim
+from pyspark.ml import Pipeline
+from pyspark.ml.feature import StringIndexer, OneHotEncoder, VectorAssembler
+from pyspark.ml.regression import LinearRegression, RandomForestRegressor, GeneralizedLinearRegression
+from pyspark.ml.evaluation import RegressionEvaluator
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+import math
+import os
+
+
+spark = SparkSession.builder.appName("LightcastModule5").getOrCreate()
+df = spark.read.option("header", "true") \
+    .option("inferSchema", "true") \
+    .option("multiLine", "true") \
+    .option("escape", "\"") \
+    .csv("./data/lightcast_job_postings.csv")
+
+print("Loaded data")
+#df.printSchema()
+#df.show(5)
+
+
+continuous_features = [
+    "MIN_YEARS_EXPERIENCE",
+    "MAX_YEARS_EXPERIENCE",
+    "DURATION",
+    "SALARY_FROM",
+    "SALARY_TO",
+]
+
+categorical_features = [
+    "EDUCATION_LEVELS_NAME",
+    "REMOTE_TYPE_NAME"
+]
+
+
+target = "SALARY"
+selected_cols = continuous_features + categorical_features + [target]
+df_clean = df.select(*selected_cols)
+
+
+
+df_clean.groupBy("MIN_YEARS_EXPERIENCE")\
+           .agg(F.count("*").alias("count")) \
+           .orderBy(F.col("MIN_YEARS_EXPERIENCE").desc())\
+           .show(truncate=False)
+
+df_clean = df_clean.withColumn("REMOTE_TYPE",
+when(trim(col("REMOTE_TYPE_NAME"))== "Remote", "Remote")
+.when(trim(col("REMOTE_TYPE_NAME"))== "Hybrid Remote", "Hybrid")
+.when(trim(col("REMOTE_TYPE_NAME"))== "Not Remote", "Onsite")
+.when(col("REMOTE_TYPE_NAME").isNull(),"Onsite")
+.otherwise("Onsite"))
+
+df_clean.select("REMOTE_TYPE_NAME").distinct().show(truncate=False)
+df_clean.drop("REMOTE_TYPE_NAME")
+
+
+df_clean = df_clean.withColumn("EXPERIENCE_GROUP",
+when(col("MIN_YEARS_EXPERIENCE").between(0,1),"Internship/Entry Level")
+.when(col("MIN_YEARS_EXPERIENCE").isNull(),"Junior")
+.when(col("MIN_YEARS_EXPERIENCE").between(1,3),"Junior")
+.when(col("MIN_YEARS_EXPERIENCE").between(3,5),"Mid-Level")
+.when(col("MIN_YEARS_EXPERIENCE").between(5,10),"Senior")
+.otherwise("Expert")
+)
+
+df_clean.show(5,truncate=False)
+
+df_clean = df_clean.withColumn(
+    "SALARY_CLEAN",
+    F.when((F.col("SALARY").isNull()) | (F.col("SALARY") == 0) | F.isnan("SALARY"), None).otherwise(F.col("SALARY"))
+).withColumn(
+    "SALARY_FROM_CLEAN",
+    F.when((F.col("SALARY_FROM").isNull()) | (F.col("SALARY_FROM") == 0) | F.isnan("SALARY_FROM"), None).otherwise(F.col("SALARY_FROM"))
+).withColumn(
+    "SALARY_TO_CLEAN",
+    F.when((F.col("SALARY_TO").isNull()) | (F.col("SALARY_TO") == 0) | F.isnan("SALARY_TO"), None).otherwise(F.col("SALARY_TO"))
+)
+df_clean = df_clean.withColumn(
+    "SALARY_FINAL",
+    F.when(F.col("SALARY_CLEAN").isNotNull(),F.col("SALARY_CLEAN"))
+    .when(
+        F.col("SALARY_FROM_CLEAN").isNotNull() & F.col("SALARY_TO_CLEAN").isNotNull(),(F.col("SALARY_FROM_CLEAN") + F.col("SALARY_TO_CLEAN"))/2
+    )
+    .when(
+        F.col("SALARY_FROM_CLEAN").isNotNull() & F.col("SALARY_TO_CLEAN").isNull(), F.col("SALARY_FROM_CLEAN")
+    )
+    .when(
+        F.col("SALARY_TO_CLEAN").isNotNull() & F.col("SALARY_FROM_CLEAN").isNull(), F.col("SALARY_TO_CLEAN")
+    )
+    .otherwise(None)
+)
+
+
+for c in selected_cols:
+    df_clean = df_clean.filter(col(c).isNotNull())
+
+print("Cleaned row count:", df_clean.count())
+df_clean = df_clean.withColumn(
+    "MIN_YEARS_EXPERIENCE_SQ",
+    pow(col("MIN_YEARS_EXPERIENCE"), 2)
+)
+
+indexers = [
+    StringIndexer(inputCol=c, outputCol=f"{c}_idx", handleInvalid="keep")
+    for c in categorical_features
+]
+
+encoders = [
+    OneHotEncoder(inputCol=f"{c}_idx", outputCol=f"{c}_vec")
+    for c in categorical_features
+]
+
+features_input = continuous_features + [f"{c}_vec" for c in categorical_features]
+
+assembler = VectorAssembler(
+    inputCols=features_input,
+    outputCol="features"
+)
+
+poly_input = [
+    "MIN_YEARS_EXPERIENCE",
+    "MIN_YEARS_EXPERIENCE_SQ",
+    "MAX_YEARS_EXPERIENCE",
+    "DURATION",
+    "SALARY_FROM"
+] + [f"{c}_vec" for c in categorical_features]
+
+poly_assembler = VectorAssembler(
+    inputCols=poly_input,
+    outputCol="features_poly"
+)
+
+pipeline = Pipeline(stages=indexers + encoders + [assembler, poly_assembler])
+pipeline_model = pipeline.fit(df_clean)
+final_df = pipeline_model.transform(df_clean)
+
+final_df.select("SALARY", "features", "features_poly").show(5, truncate=False)
+
+
+train_df, test_df = final_df.randomSplit([0.8, 0.2], seed=42)
+
+print("Train count:", train_df.count())
+print("Test count:", test_df.count())
+
+
+lr = LinearRegression(
+    featuresCol="features",
+    labelCol="SALARY"
+)
+
+lr_model = lr.fit(train_df)
+lr_predictions = lr_model.transform(test_df)
+
+
+poly_lr = LinearRegression(
+    featuresCol="features_poly",
+    labelCol="SALARY"
+)
+
+poly_model = poly_lr.fit(train_df)
+poly_predictions = poly_model.transform(test_df)
+
+
+rf = RandomForestRegressor(
+    featuresCol="features",
+    labelCol="SALARY",
+    numTrees=200,
+    maxDepth=8,
+    seed=42
+)
+
+rf_model = rf.fit(train_df)
+rf_predictions = rf_model.transform(test_df)
+
+
+rmse_eval = RegressionEvaluator(labelCol="SALARY", predictionCol="prediction", metricName="rmse")
+r2_eval = RegressionEvaluator(labelCol="SALARY", predictionCol="prediction", metricName="r2")
+mae_eval = RegressionEvaluator(labelCol="SALARY", predictionCol="prediction", metricName="mae")
+
+def evaluate_model(name, predictions, model_summary=None, num_params=None):
+    rmse = rmse_eval.evaluate(predictions)
+    r2 = r2_eval.evaluate(predictions)
+    mae = mae_eval.evaluate(predictions)
+
+    aic = None
+    bic = None
+
+    if model_summary is not None:
+        try:
+            aic = model_summary.aic
+        except:
+            aic = None
+
+        try:
+            n = model_summary.numInstances
+            deviance = model_summary.deviance
+            dispersion = model_summary.dispersion
+            k = num_params if num_params is not None else len(model_summary.coefficients) + 1
+
+            log_likelihood = -0.5 * (
+                n * math.log(2 * math.pi)
+                + n * math.log(dispersion)
+                + deviance / dispersion
+            )
+            bic = k * math.log(n) - 2 * log_likelihood
+        except:
+            bic = None
+
+    return {
+        "Model": name,
+        "RMSE": rmse,
+        "R2": r2,
+        "MAE": mae,
+        "AIC": aic,
+        "BIC": bic
+    }
+
+lr_results = evaluate_model(
+    "Linear Regression",
+    lr_predictions,
+    lr_model.summary,
+    len(lr_model.coefficients) + 1
+)
+
+poly_results = evaluate_model(
+    "Polynomial Regression",
+    poly_predictions,
+    poly_model.summary,
+    len(poly_model.coefficients) + 1
+)
+
+rf_results = evaluate_model(
+    "Random Forest",
+    rf_predictions,
+    None,
+    None
+)
+
+results_df = pd.DataFrame([lr_results, poly_results, rf_results])
+print(results_df)
+
+```
+
+## In the linear model based on the available data, we can approach it in the understanding that there is a straight correlation between salary and years of relevant experience. In this situation, a search may yield results that align with the belief that each added year of experience will result in an increased salary figure.
+
+```{python}
+
+# Linear model feature names
+linear_feature_names = final_df.schema["features"].metadata["ml_attr"]["attrs"]
+linear_names = []
+
+for attr_type in linear_feature_names:
+    for item in linear_feature_names[attr_type]:
+        linear_names.append(item["name"])
+
+coef_df = pd.DataFrame({
+    "Feature": linear_names,
+    "Coefficient": list(lr_model.coefficients)
+})
+
+# Polynomial model feature names
+poly_feature_names = final_df.schema["features_poly"].metadata["ml_attr"]["attrs"]
+poly_names = []
+
+for attr_type in poly_feature_names:
+    for item in poly_feature_names[attr_type]:
+        poly_names.append(item["name"])
+
+poly_coef_df = pd.DataFrame({
+    "Feature": poly_names,
+    "Coefficient": list(poly_model.coefficients)
+})
+
+print("\nPolynomial Regression Coefficients:")
+print(poly_coef_df)
+
+```
+
+## In the polynominal regression, we can see a relationship of how salary and experience can curve in different ways. For instance, someone with a smaller amount of experience may see an increase in salary growth over time, but salary will slow down as experience goes on.
+
+```{python}
+
+lr_pd = lr_predictions.select("SALARY", "prediction").toPandas()
+lr_pd["Model"] = "Linear Regression"
+
+poly_pd = poly_predictions.select("SALARY", "prediction").toPandas()
+poly_pd["Model"] = "Polynomial Regression"
+
+rf_pd = rf_predictions.select("SALARY", "prediction").toPandas()
+rf_pd["Model"] = "Random Forest"
+
+all_preds = pd.concat([lr_pd, poly_pd, rf_pd], ignore_index=True)
+all_preds.to_csv("output/model_predictions.csv", index=False)
+
+
+fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+axes = axes.flatten()
+
+plot_data = [
+    ("Linear Regression", lr_pd),
+    ("Polynomial Regression", poly_pd),
+    ("Random Forest", rf_pd)
+]
+
+for i, (name, data) in enumerate(plot_data):
+    axes[i].scatter(data["SALARY"], data["prediction"], alpha=0.5)
+    min_val = min(data["SALARY"].min(), data["prediction"].min())
+    max_val = max(data["SALARY"].max(), data["prediction"].max())
+    axes[i].plot([min_val, max_val], [min_val, max_val], linestyle="--")
+    axes[i].set_title(name)
+    axes[i].set_xlabel("Actual SALARY")
+    axes[i].set_ylabel("Predicted SALARY")
+
+axes[3].axis("off")
+plt.tight_layout()
+plt.savefig("output/model_comparison.png")
+plt.show()
+plt.close()
+
+
+rf_feature_names = linear_names
+rf_importances = rf_model.featureImportances.toArray()
+
+print("RF feature names:", len(rf_feature_names))
+print("RF importances:", len(rf_importances))
+ 
+```
+
+## The random forest regression is meant to help interpret based on data in a scenario based situation, with the guide of various decision trees. In this context, it might be related to looking up a salary range, based on factors like years experience and relevant work experience.
+
+```{python}
+
+rf_imp_df = pd.DataFrame({
+    "Feature": rf_feature_names,
+    "Importance": rf_importances
+}).sort_values("Importance", ascending=False).head(10)
+
+rf_imp_df = pd.DataFrame({
+    "Feature": rf_feature_names,
+    "Importance": rf_importances
+}).sort_values("Importance", ascending=False).head(10)
+
+plt.figure(figsize=(10, 6))
+sns.barplot(data=rf_imp_df, x="Importance", y="Feature")
+plt.title("Top 10 Feature Importances - Random Forest")
+plt.tight_layout()
+plt.savefig("output/rf_feature_importance.png")
+plt.show()
+plt.close()
+
+
+results_df.to_csv("output/model_metrics.csv", index=False)
+coef_df.to_csv("output/linear_coefficients.csv", index=False)
+poly_coef_df.to_csv("output/polynomial_coefficients.csv", index=False)
+
+print("Done. Files saved in output/")
+spark.stop
+```

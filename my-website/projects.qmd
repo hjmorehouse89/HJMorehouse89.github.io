@@ -1,0 +1,15 @@
+---
+title: "Projects"
+---
+
+## Spark SQL and Dataframes
+
+<a href=A02-HollyJM@BU.edu.html>Assignment 2</a>
+
+## Big Data Visualization on Scale
+
+<a href=A03-SP26-HJMOREHOUSE89.html>Assignment 3</a>
+
+## Machine Learning on Scale
+
+<a href=A04-SP26-HJMorehouse89.html>Assignment 4/5</a>

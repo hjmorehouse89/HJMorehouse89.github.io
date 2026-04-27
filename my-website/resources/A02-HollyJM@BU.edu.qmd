@@ -1,0 +1,336 @@
+---
+title: "Module 2 Assignment: Spark SQL and DataFrames"
+author:
+  - name: Holly Morehouse
+    affiliations:
+      - id: bu
+        name: Boston University
+        city: Boston
+        state: MA
+number-sections: true
+date: '2024-11-21'
+format:
+  html:
+    theme: cerulean
+    toc: true
+    toc-depth: 2
+  docx:
+    toc: true
+    toc-depth: 2
+    number-sections: true
+    syntax-highlighting: github
+date-modified: today
+date-format: long
+execute:
+  echo: false
+  eval: true
+  freeze: auto
+---
+
+
+## System Information {.unnumbered}
+
+```{python}
+# | eval: true
+# | echo: true
+import platform
+import psutil
+
+print("Operating System:", platform.system(), platform.release())
+print("Python Version:", platform.python_version())
+print("Machine:", platform.machine())
+print("Processor:", platform.processor())
+
+mem = psutil.virtual_memory()
+print("Total Memory (MB):", round(mem.total / (1024**2), 2))
+print("Available Memory (MB):", round(mem.available / (1024**2), 2))
+```
+
+
+## Start your assignment here
+
+GitHub Repo: https://github.com/AD688-SP26/a02-sp26-hjmorehouse89/tree/main
+
+## Test Load
+```{python}
+from pyspark.sql import SparkSession
+
+# Start a Spark session
+spark = SparkSession.builder.config("spark.driver.host", "localhost").appName("JobPostingsAnalysis").getOrCreate()
+spark.catalog.clearCache()
+
+# Load the CSV file into a Spark DataFrame
+df = spark.read.option("header", "true").option("inferSchema", "true").option(
+    "multiLine", "true").option("escape", "\"").csv("./data/lightcast_job_postings.csv")
+
+# Register the DataFrame as a temporary SQL view
+df.createOrReplaceTempView("jobs")
+
+# Show Schema and Sample Data
+print("---This is Diagnostic check, No need to print it in the final doc---")
+
+# comment the lines below when rendering the submission
+df.printSchema()
+df.show(5)
+```
+
+## Jobs Test Table
+
+```{python}
+spark.sql("SELECT ID AS job_id, title_raw AS job_title, body AS job_description FROM jobs LIMIT 5").show(truncate=False)
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import col, monotonically_increasing_id
+
+#initialize Spark Session
+spark = SparkSession.builder.appName("JobPostingsDB").getOrCreate()
+
+#Load the Full Dataset
+df = spark.read.option("header", "true").option("multiLine","true").option("escape","\"").csv("./data/lightcast_job_postings.csv")
+
+df.show(5)
+
+```
+
+## Companies
+
+```{python}
+
+companies_df = df.select(
+  col("ID"),
+  col("company"),
+  col("company_name"),
+  col("company_raw"),
+  col("company_is_staffing")
+).distinct().withColumn("company_id", monotonically_increasing_id())
+companies_df.show(5)
+companies = companies_df.toPandas()
+companies.drop(columns=["company"], inplace=True)
+companies.rename(columns={"company_is_staffing": "is_staffing"}, inplace=True)
+companies.to_csv("./output/companies.csv", index=False)
+companies.head()
+```
+
+
+## Industries
+
+```{python}
+from pyspark.sql.functions import col, monotonically_increasing_id
+
+industries_df = df.select(
+    col("naics_2022_6").alias("industry_code"),
+    col("naics_2022_6_name"),
+    col("soc_5").alias("soc_code"),
+    col("soc_5_name").alias("soc_name"),
+    col("lot_specialized_occupation_name").alias("specialized_occupation"),
+    col("lot_occupation_group").alias("occupation_group")
+).distinct().withColumn("industry_id", monotonically_increasing_id())
+
+# Rearrange columns to have industry_id first
+industries_df = industries_df.select(
+    "industry_id",
+    "industry_code",
+    "naics_2022_6_name",
+    "soc_code",
+    "soc_name",
+    "specialized_occupation",
+    "occupation_group"
+)
+
+industries_df.show(5, truncate=False)
+```
+
+## Locations
+
+```{python}
+
+locations_df = df.select(
+  col("location").alias("lat-long"),
+  col("city_name"),
+  col("state_name"),
+  col("county_name"),
+  col("msa"),
+  col("msa_name")
+).distinct().withColumn("location_id", monotonically_increasing_id())
+locations_df.show(5,truncate=False)
+
+```
+
+```{python}
+from pyspark.sql.functions import from_json, col
+from pyspark.sql.types import StructType, StructField, DoubleType
+
+location_schema = StructType([
+  StructField("lat", DoubleType(), True),
+  StructField("lon", DoubleType(), True)
+])
+
+locations_df2 = locations_df \
+    .withColumn("location_struct", from_json(col("lat-long"),location_schema)) \
+        .withColumn("latitude", col("location_struct.lat")) \
+            .withColumn("longitude", col("location_struct.lon")) \
+                .drop("location_struct")
+
+locations_df2.show(5, truncate=False)
+
+locations_clean = locations_df2.select(
+  col("location_id"),
+  col("latitude"),
+  col("longitude"),
+  col("city_name"),
+  col("county_name"),
+  col("state_name"),
+  col("msa").alias("msa_id"),
+  col("msa_name")
+)
+
+locations_clean.show(5, truncate=False)
+
+```
+
+## Job Postings
+
+```{python}
+job_postings_df = df.select(
+  col("id").alias("job_id"),
+  col("title_clean"),
+  col("body"),
+  col("company"),
+  col("employment_type_name"),
+  col("remote_type_name"),
+  col("min_years_experience"),
+  col("max_years_experience"),
+  col("salary"),
+  col("salary_from"),
+  col("salary_to"),
+  col("location"),
+  col("naics_2022_6").alias("industry_code"),
+  col("posted"),
+  col("expired"),
+  col("duration")
+)
+
+#job_postings_df.show(5)
+
+job_postings_df = job_postings_df.join(companies_df.select("company","company_id"),
+                                        on="company", how="left")
+job_postings_df = job_postings_df.join(locations_df.select("lat-long","location_id"),
+                                        job_postings_df.location == locations_df["lat-long"],
+                                        how="left").drop("location")
+job_postings_df = job_postings_df.join(industries_df.select("industry_code","industry_id"),
+                                        job_postings_df.industry_code == industries_df.industry_code, 
+                                        how="left").drop("industry_code")
+
+job_postings_df = job_postings_df.drop("company", "lat-long")
+
+job_postings_df.show(5)
+
+```
+
+## Register Tables in Spark
+
+```{python}
+job_postings_df.createOrReplaceTempView("job_postings")
+companies_df.createOrReplaceTempView("companies")
+industries_df.createOrReplaceTempView("industries")
+locations_df.createOrReplaceTempView("locations")
+```
+
+```{python}
+distinct_specialized_occupations = spark.sql("SELECT DISTINCT specialized_occupation FROM industries")
+distinct_specialized_occupations.show(truncate=False)
+```
+
+## Query 1
+
+```{python}
+from pyspark.sql import functions as F
+#from pyspark.sql import SparkSession
+#spark = SparkSession.builder.appName("JobPostingsDB").getOrCreate()
+
+
+tech_salary_df = spark.sql("""
+  SELECT i.specialized_occupation, i.naics_2022_6_name AS industry_name, PERCENTILE_APPROX(j.salary, 0.5) AS median_salary
+  FROM job_postings j
+  JOIN industries i ON j.industry_id = i.industry_id
+  WHERE j.salary IS NOT NULL
+      AND j.salary > 0
+      AND i.industry_code = '518210'
+  GROUP BY i.specialized_occupation, industry_name 
+  ORDER BY median_salary DESC
+  """)
+
+tech_salary_df.show()
+```
+
+
+## Query 1 Plotly Plot
+```{python}
+import plotly.express as px
+fig = px.bar(tech_salary_df, x='median_salary', y='specialized_occupation',color='industry_name', width=800)
+fig.update_layout(legend=dict(
+  orientation="h",
+  yanchor="bottom",
+  y=1.02,
+  xanchor="right",
+  x=1
+))
+fig.show()
+
+```
+
+## Query 2
+
+```{python}
+from pyspark.sql import functions as F
+#from pyspark.sql import SparkSession
+#spark = SparkSession.builder.appName("JobPostingsDB").getOrCreate()
+
+
+remote_jobs_df = spark.sql("""
+  SELECT COUNT(j.remote_type_name) AS remote_count, l.state_name, c.company_name 
+  FROM job_postings j
+  JOIN companies c ON j.company_id = c.company_id
+  JOIN locations l ON j.location_id = l.location_id
+  WHERE l.state_name IS NOT NULL
+      AND l.state_name = 'California'
+      AND j.remote_type_name = 'Remote'
+      AND c.company_name <> 'Unclassified'
+  GROUP BY c.company_name, l.state_name
+  ORDER BY remote_count DESC
+  LIMIT 5
+  """)
+
+remote_jobs_df.show()
+```
+
+## Query 2 Plot
+
+```{python}
+import seaborn as sns
+import matplotlib.pyplot as plt
+
+remote_jobs_pd = remote_jobs_df.toPandas()
+
+if remote_jobs_pd.empty:
+  print("Uh Oh, your Table is empty")
+else:
+  sns.set_theme(style="whitegrid")
+  plt.figure(figsize=(12,6))
+
+  ax = sns.barplot(
+    data=remote_jobs_pd,
+    x= "company_name",
+    y= "remote_count"
+  )
+  
+  ax.set_xlabel("Company Name")
+  ax.set_ylabel("Remote Jobs")
+  ax.set_title("Remote Jobs in California")
+
+  plt.savefig("./figures/Remote_Jobs_Plot.png", dpi=300, bbox_inches="tight")
+
+  plt.show()
+
+```
+
+

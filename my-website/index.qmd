@@ -1,0 +1,25 @@
+---
+title: "Holly Morehouse"
+format:
+  html:
+    theme: cyborg
+    toc: false
+    page-layout: full
+---
+
+# Hello There!
+
+Welcome to my website! I’m a training & development coach within the personal lines insurance industry.  
+Explore my work, background, and ways to connect below.
+
+---
+
+## 🌟 What You’ll Find Here
+
+- <a href="about.html">**About**</a> – Learn more about my background and experience  
+- <a href="projects.html">**Projects**</a> – Explore my work and case studies  
+- <a href="cv.html">**CV**</a> – View my professional history  
+- <a href="contact.html">**Contact**</a> – Get in touch  
+
+---
+

@@ -1,0 +1,7 @@
+---
+title: "Contact"
+---
+Interested in dropping me a line? You can send an email with the link below!
+
+Email: <a href=mailto:hollyjm@bu.edu>hollyjm@bu.edu</a>
+

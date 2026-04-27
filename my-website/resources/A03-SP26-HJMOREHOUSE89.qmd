@@ -1,0 +1,300 @@
+---
+title: "Module 2 Assignment: Spark SQL and DataFrames"
+author:
+  - name: Holly Morehouse
+    affiliations:
+      - id: bu
+        name: Boston University
+        city: Boston
+        state: MA
+number-sections: true
+date: '2024-11-21'
+format:
+  html:
+    theme: cerulean
+    toc: true
+    toc-depth: 2
+  docx:
+    toc: true
+    toc-depth: 2 
+date-modified: today
+date-format: long
+execute:
+  echo: false
+  eval: true
+  freeze: auto
+---
+
+## GitHub Repo
+
+https://github.com/hjmorehouse89/A03-sp26-hjmorehouse89
+
+```{python}
+
+import pandas as pd
+import plotly.express as px
+import plotly.io as pio
+from pyspark.sql import SparkSession
+import re
+import numpy as np
+import plotly.graph_objects as go
+from pyspark.sql.functions import col, split, explode, regexp_replace, transform, when, trim, replace 
+from pyspark.sql import functions as F
+from pyspark.sql.functions import col, monotonically_increasing_id
+
+np.random.seed(42)
+
+pio.renderers.default = "notebook+svg+png"
+
+# Initialize Spark Session
+spark = SparkSession.builder.appName("LightcastData").getOrCreate()
+
+# Load Data
+df = spark.read.option("header", "true").option("inferSchema", "true").option("multiLine","true").option("escape", "\"").csv("./data/lightcast_job_postings.csv")
+df.createOrReplaceTempView("job_postings")
+
+# Show Schema and Sample Data
+#print("---This is Diagnostic check, No need to print it in the final doc---")
+
+#df.printSchema() # comment this line when rendering the submission
+#df.show(5)
+
+```
+
+
+Plotly Template
+```{python}
+import plotly.graph_objects as go
+import plotly.io as pio
+
+pio.templates["nike"] = go.layout.Template(
+    # LAYOUT
+    layout = {
+        # Fonts
+        # Note - 'family' must be a single string, NOT a list or dict!
+        'title':
+            {'font': {'family': 'HelveticaNeue-CondensedBold, Helvetica, Sans-serif',
+                      'size':30,
+                      'color': '#333'}
+            },
+        'font': {'family': 'Helvetica Neue, Helvetica, Sans-serif',
+                      'size':16,
+                      'color': '#333'},
+        # Colorways
+        'colorway': ['#e56414', '#a15b5b'],
+        # Keep adding others as needed below
+        'hovermode': 'x unified'
+    },
+    # DATA
+    data = {
+        # Each graph object must be in a tuple or list for each trace
+        'bar': [go.Bar(texttemplate = '%{value:$.2s}',
+                       textposition='outside',
+                       textfont={'family': 'Helvetica Neue, Helvetica, Sans-serif',
+                                 'size': 20,
+                                 'color': '#FFFFFF'
+                                 })]
+    }
+)
+```
+
+## Casting Salary and Experience Columns 
+```{python}
+
+df = df.withColumn("SALARY_FROM", col("SALARY_FROM").cast("float")) \
+       .withColumn("SALARY_TO",col("SALARY_TO").cast("float")) \
+       .withColumn("SALARY",col("SALARY").cast("float")) \
+       .withColumn("MAX_YEARS_EXPERIENCE", col("MAX_YEARS_EXPERIENCE").cast("float"))
+
+def compute_median(sdf, col_name):
+    q = sdf.approxQuantile(col_name, [0.5], 0.01)
+    return q[0] if q else None
+
+median_from = compute_median(df, "SALARY_FROM")
+median_to = compute_median(df, "SALARY_TO")
+median_salary = compute_median(df, "SALARY")
+print("Medians: ", median_from, median_to, median_salary)
+
+
+df = df.fillna({
+    "SALARY_FROM":median_from,
+    "SALARY_TO": median_to
+})
+
+df = df.withColumn("AVERAGE_SALARY", (col("SALARY_FROM") + col("SALARY_TO"))/2)
+
+df = df.replace("EDUCATION_LEVELS_NAME", "[\\n")
+
+export_cols = [
+    "EDUCATION_LEVELS_NAME",
+    "REMOTE_TYPE_NAME",
+    "MAX_YEARS_EXPERIENCE",
+    "AVERAGE_SALARY",
+    "LOT_V6_SPECIALIZED_OCCUPATION_NAME"
+]
+df_selected = df.select(*export_cols)
+
+pdf = df_selected.toPandas()
+pdf.to_csv("./data/lightcast_cleaned.csv",index = False)
+print("Cleaned up the Data. Number of Rows: ", len(pdf))
+
+df_selected.show(10)
+```
+
+
+## Salary Distribution by Industry and Employment Type
+
+```{python}
+
+pdf = df.select("NAICS2_NAME", "SALARY","EMPLOYMENT_TYPE_NAME").toPandas()
+fig = px.box(pdf, x="NAICS2_NAME", y="SALARY", color="EMPLOYMENT_TYPE_NAME", title ="Salary Distribution by Industry", color_discrete_sequence=["#AA00FF","#00AA77","#AA7700"])
+fig.update_layout(template="nike", height = 750, width = 1500)
+fig.update_xaxes(tickangle=45)
+fig.update_layout(boxmode='group')
+fig.write_image("figures/Q2.svg")
+fig.write_image("figures/Q2.png")
+fig.show()
+```
+
+## Key Insights
+
+The generated graph with detailed box plots shows how the highest amount of salary variations are coming from human services fields, such as health care, which includes the widest margin in salary level, as well as information. However, the strongest salary outliers can be found in the administrative support and remediation & waste management fields. Both show the potential for salary, indicative of positions that require advanced skill , education, and risk.   
+
+## Salary Analysis by ONET Occupation Type
+```{python}
+salary_analysis_df = spark.sql("""
+    SELECT
+      LOT_OCCUPATION_NAME AS Occupation_Name,
+      PERCENTILE(SALARY,0.5) AS Median_Salary,
+      COUNT(*) AS Job_Postings
+    FROM job_postings
+    GROUP BY LOT_OCCUPATION_NAME
+    ORDER BY Job_Postings DESC
+    LIMIT(5)
+""")
+salary_pd = salary_analysis_df.toPandas()
+salary_pd.head
+
+fig = px.scatter(
+  salary_pd,
+  x="Occupation_Name",
+  y="Median_Salary",
+  size="Job_Postings"
+)
+fig.write_image("figures/Q3.svg")
+fig.write_image("figures/Q3.png")
+fig.show()
+
+```
+
+## Key Insights
+
+The median salary graph show an interesting relationship of occupation median salary to job availability, which can be understood based on position demands and experience. For example, while there are a higher number of postings for a data analyst, the business intelligence analyst has almost as many positions open, yet a significantly higher pay median. This can also be supported in the demonstration of the computer science positions having fewer position postings, yet a higher salary median. The graph infers and represents the competitive and technical nature of the computer systems field.  
+
+
+## Salary by Education Level
+
+```{python}
+from pyspark.sql.functions import randn
+#define education level groups
+bachelor_lower = ["GED","No Education Listed", "High school", "Bachelor's"]
+masters_higher = ["Master's degree", "PhD or professional degree"]
+
+df_edu = df.withColumn(
+  "EDU_GROUP",
+  when(col("EDUCATION_LEVELS_NAME").rlike("|".join([f"(?i){deg}" for deg in bachelor_lower])), "Bachelor's or Lower")
+  .when(col("EDUCATION_LEVELS_NAME").rlike("|".join([f"(?i){deg}" for deg in masters_higher])), "Master's or Higher")
+  .otherwise("Other")  
+)
+
+df_edu = df_edu.withColumn("MAX_YEARS_EXPERIENCE", col("MAX_YEARS_EXPERIENCE").cast("float"))
+df_edu = df_edu.withColumn("AVERAGE_SALARY", col("AVERAGE_SALARY").cast("float"))
+
+df_edu = df_edu.filter(
+  col("MAX_YEARS_EXPERIENCE").isNotNull() &
+  col("AVERAGE_SALARY").isNotNull() &
+  (col("MAX_YEARS_EXPERIENCE") > 0) &
+  (col("AVERAGE_SALARY") > 0)
+)
+
+df_filtered = df_edu.filter(col("EDU_GROUP").isin("Bachelor's or Lower", "Master's or Higher"))
+
+df_filtered = df_filtered.withColumn("MAX_YEARS_EXPERIENCE_JITTER", col("MAX_YEARS_EXPERIENCE") + randn() * 0.1)
+
+df_pd = df_filtered.toPandas()
+
+
+
+```
+
+
+```{python}
+fig_edusalary = px.scatter(
+    df_pd,
+    x="MAX_YEARS_EXPERIENCE_JITTER",
+    y="AVERAGE_SALARY",
+    color="EDU_GROUP",
+    hover_data=["LOT_V6_SPECIALIZED_OCCUPATION_NAME"],
+    title = "Experience vs Salary by Education Level",
+    color_discrete_sequence=["#0088FF","#8800EE"]
+)
+
+fig_edusalary.update_traces(marker=dict(size=7,line=dict(width=1, color="black")))
+
+fig_edusalary.write_image("figures/Q4.svg")
+fig_edusalary.write_image("figures/Q4.png")
+fig_edusalary.show()
+```
+
+## Key Insights
+A significant insight is showing how there's more averages within certain business roles and positions for those with masters degrees or higher, whereas the variation is more profound for those with a bachelors degree or lower. One could infer that a master's degree or higher, would increase changes of having your salary be closest to the average salary of the role, and in contrast, giving it more stablity and reliability in salary, compared with those who only have a bachelor's degree or lower.  
+
+## Salary By Remote Work Type
+
+```{python}
+from pyspark.sql.functions import when, col, trim
+
+df_remote = df.withColumn("REMOTE_GROUP",
+    when(trim(col("REMOTE_TYPE_NAME")) == "Remote", "Remote")
+    .when(trim(col("REMOTE_TYPE_NAME")) == "Hybrid Remote", "Hybrid")
+    .when(trim(col("REMOTE_TYPE_NAME")) == "Not Remote", "Onsite")
+    .when(col("REMOTE_TYPE_NAME").isNull(), "Onsite")
+    .otherwise("Onsite")
+)
+
+df_remote = df_remote.filter(
+  col("MAX_YEARS_EXPERIENCE").isNotNull() &
+  col("AVERAGE_SALARY").isNotNull() &
+  (col("MAX_YEARS_EXPERIENCE")>0) &
+  (col("AVERAGE_SALARY") > 0)
+)
+
+df_remote = df_remote.withColumn("MAX_YEARS_EXPERIENCE_JITTER", col("MAX_YEARS_EXPERIENCE") + randn() * 0.1)
+
+df_pd = df_remote.select("MAX_YEARS_EXPERIENCE_JITTER", "AVERAGE_SALARY", "LOT_V6_SPECIALIZED_OCCUPATION_NAME", "REMOTE_GROUP").toPandas()
+
+
+
+```
+
+```{python}
+fig_remotesalary = px.scatter(
+    df_pd,
+    x="MAX_YEARS_EXPERIENCE_JITTER",
+    y="AVERAGE_SALARY",
+    color="REMOTE_GROUP",
+    hover_data=["LOT_V6_SPECIALIZED_OCCUPATION_NAME"],
+    title = "Experience vs Salary by Education Level",
+    color_discrete_sequence=["#0088FF","#8800EE","#009955","#FF5500"]
+)
+
+fig_remotesalary.update_traces(marker=dict(size=7,line=dict(width=1, color="black")))
+
+fig_remotesalary.write_image("figures/Q5.svg")
+fig_remotesalary.write_image("figures/Q5.png")
+fig_remotesalary.show()
+```
+
+## Key Insights
+
+The salary medians begin to increase for hybrid positions over the years. While experience does matter in increasing the median salaries for certain roles such as Enterprise Architechs, especially onsite, there is reason to believe that experience is not the only key factor in salary range. Education and accessibility to physical office space for onsite and hybrid employees can play a factor into someone's salary level.  
